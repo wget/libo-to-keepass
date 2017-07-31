@@ -1,15 +1,21 @@
 #!/bin/python
 # -*-coding:utf-8 -*
+import os
 import argparse
-import os.path
-from getpass import getpass
-import csv
-from pykeepass import PyKeePass
-from pykeepass.entry import Entry
-from datetime import datetime
 import unicodedata
 import re
-import os
+import csv
+
+from getpass import getpass
+from datetime import datetime
+
+from pykeepass import PyKeePass
+from pykeepass.entry import Entry
+
+NUMBER_MAX_RECORD_IN_MEMORY = 10
+
+number_kp_entries = 0
+number_csv_entries = 0
 
 class Colors:
 
@@ -51,6 +57,7 @@ class Colors:
 
     colorReset = '[0m'
 
+
 class Effects:
 
     effectBright = '[1m'
@@ -73,17 +80,20 @@ class Effects:
 
     effectReset = '[0m'
 
+
 def info(string):
     if os.fstat(0) == os.fstat(1):
         print('[' + Colors.textGreen + Effects.effectBright + '+' + Colors.colorReset + '] ' + string)
     else:
         print('[+] ' + string)
 
+
 def error(string):
     if os.fstat(0) == os.fstat(1):
         print('[' + Colors.textRed + Effects.effectBright + '-' + Colors.colorReset + '] ' + string)
     else:
         print('[-] ' + string)
+
 
 class KeePass(PyKeePass):
 
@@ -108,10 +118,12 @@ class KeePass(PyKeePass):
 
         entries_to_add.clear()
 
+
 # src.: https://stackoverflow.com/a/518232/3514658
 def sanitize_string(s):
     return ''.join(c for c in unicodedata.normalize('NFD', s)
                   if unicodedata.category(c) != 'Mn')
+
 
 def main():
 
@@ -148,12 +160,12 @@ def main():
         required = False)
     args = args_parser.parse_args()
 
-    if args.password is not None:
+    if args.password:
         password = args.password
     else:
         password = getpass('Please specify your keepass database password : ')
 
-    if args.group is not None:
+    if args.group:
         group_name = args.group
     else:
         group_name = '3rd parties'
@@ -281,7 +293,7 @@ def main():
                 else:
                     # Avoid to have too much records in memory by saving the
                     # file.
-                    if len(entries_to_add) == 10:
+                    if len(entries_to_add) == NUMBER_MAX_RECORD_IN_MEMORY:
                         kp.save(group, entries_to_add)
 
                     entry = Entry(
@@ -315,7 +327,5 @@ def main():
                 str(number_csv_entries))
 
 
-number_kp_entries = 0
-number_csv_entries = 0
 if __name__ == "__main__":
     main()
