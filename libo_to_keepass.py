@@ -12,10 +12,30 @@ from datetime import datetime
 from pykeepass import PyKeePass
 from pykeepass.entry import Entry
 
-NUMBER_MAX_RECORD_IN_MEMORY = 10
+class CustomPyKeePass(PyKeePass):
 
-number_kp_entries = 0
-number_csv_entries = 0
+    def add_entry(self, group, entry):
+
+        entries = PyKeePass.find_entries(
+            self,
+            title = entry.title,
+            username = entry.username,
+            first = True,
+            group = group,
+            recursive = False
+        )
+
+        if entries:
+            raise Exception(
+                'An entry "{}" already exists in "{}"'.format(
+                    entry.title, group
+                )
+            )
+
+        group.append(entry)
+
+        return entry
+
 
 class Colors:
 
@@ -83,40 +103,32 @@ class Effects:
 
 def info(string):
     if os.fstat(0) == os.fstat(1):
-        print('[' + Colors.textGreen + Effects.effectBright + '+' + Colors.colorReset + '] ' + string)
+        print(
+            '[' +
+            Colors.textGreen + Effects.effectBright +
+            '+' +
+            Colors.colorReset +
+            '] ' +
+            string)
     else:
         print('[+] ' + string)
 
 
 def error(string):
     if os.fstat(0) == os.fstat(1):
-        print('[' + Colors.textRed + Effects.effectBright + '-' + Colors.colorReset + '] ' + string)
+        print(
+            '[' +
+            Colors.textRed + Effects.effectBright +
+            '-' +
+            Colors.colorReset +
+            '] ' +
+            string)
     else:
         print('[-] ' + string)
 
 
-class KeePass(PyKeePass):
-
-    def add_entry(self, group, entry):
-        group.append(entry)
-
-    def save(self, group, entries_to_add):
-
-        global number_kp_entries
-
-        for entry in entries_to_add:
-            info('Adding \'' + entry.title + '\'...')
-            self.add_entry(group, entry)
-            number_kp_entries += 1
-
-        # Once issue 43 is merged, we will be able to call the parent save()
-        # method instead with PyKeePass.save()
-        # src.: https://github.com/pschmitt/pykeepass/issues/43
-        with open(self.kdb_filename, 'wb+') as outfile:
-            self.kdb.unprotect()
-            self.kdb.write_to(outfile)
-
-        entries_to_add.clear()
+def progress(step, total):
+    return str(step).zfill(len(str(total))) + '/' + str(total)
 
 
 # src.: https://stackoverflow.com/a/518232/3514658
@@ -128,9 +140,12 @@ def sanitize_string(s):
 def main():
 
     args_parser = argparse.ArgumentParser(
-        description = "Convert a CSV file with several columns "\
-                "(website name, website address, account state, "\
-                "login, password, contacted at and notes) to a keepass database")
+        description = 
+            "Convert a CSV file with several columns "\
+            "(website name, website address, account state, "\
+            "login, password, contacted at and notes) to a keepass database"
+    )
+
     # Even if the required boolean is set, the arguments are still set to the
     # optional group. The argsparse lib considers named arguments are optional and
     # positional arguments are mandatory by default. This fix is to create or own
@@ -165,26 +180,31 @@ def main():
     else:
         password = getpass('Please specify your keepass database password : ')
 
-    if args.group:
-        group_name = args.group
-    else:
-        group_name = '3rd parties'
-    info('Group name set to \'' + group_name + '\'')
-
     destination_filename = args.destination.name.split('/')
     destination_filename = destination_filename[len(destination_filename) - 1]
-    info('Opening KeePass database \'' + str(destination_filename) + '\'...')
+
     try:
-        kp = KeePass(args.destination.name, password)
+        info('Opening KeePass database \'' + str(destination_filename) + '\'...')
+        kp = CustomPyKeePass(filename = args.destination.name, password = password)
     except IndexError:
         error('The password you provided is incorrect or the KeePass file is invalid or has been corrupted.')
         quit()
-    del password
 
-    group = kp.find_groups_by_name(group_name, first=True)
-    if group is None:
-        info('Using root as default target group...')
-        group = kp.add_group(kp.root_group, group_name)
+    if args.group:
+        # We always need to have a group instance to feed to PyKeePass
+        group = kp.find_groups_by_name(args.group, first=True)
+        if group:
+            info('Reusing "' + group.name + '" group to store entries in the KDBX database...')
+        else:
+            info('Creating new "' + args.group + '" group to store entries in the KDBX database...')
+            group = kp.add_group(kp.root_group, args.group)
+    else:
+        info('Using first group found from KDBX database...')
+        group = kp.root_group
+
+    # Make sure the password isn't residing in memory since we don't need it
+    # anymore
+    del password
 
     entries_to_add = []
     fields = {
@@ -196,20 +216,24 @@ def main():
         'contact': '',
         'notes': ''
     }
-    global number_kp_entries
-    global number_csv_entries
 
     # Regex to remove tabs, new lines, etc. i.e. non visible chars.
     string_sanitizer = re.compile(r'\n|\t|\r|\x0b|\x0c')
 
     with open(args.source.name, newline = '') as csv_file:
+        csv_records_total = len(list(x for x in csv.DictReader(csv_file, fields)))
+
+    with open(args.source.name, newline = '') as csv_file:
 
         csv_records = csv.DictReader(csv_file, fields)
+        csv_records_inserted = 1
+
         # record is an OrderedDict which remembers the order in which the
         # elements have been inserted
         for record in csv_records:
 
-            # If this is the first line
+
+            # Skip the header line (first line)
             if record['title'].lower() == 'Website name'.lower() and \
                record['url'].lower() == 'Website address'.lower() and \
                record['username'].lower() == 'Login ID'.lower() and \
@@ -219,15 +243,19 @@ def main():
                 info('CSV header detected, skipping it...')
                 continue
 
-            # Sanitization
+            # When there are several website names, separate them by slashes;
+            # same for URL
+            record['title'] = " / ".join(record['title'].splitlines())
+            record['url'] = " / ".join(record['url'].splitlines())
+
+            # Remove accentuated characters
             record['title'] = sanitize_string(record['title'])
             record['title'] = string_sanitizer.sub(" ", record['title'])
             record['username'] = string_sanitizer.sub(" ", record['username'])
-            username_sanitized = sanitize_string(record['username'])
 
             # Remember the original record title when we are trying new names
             # when name collisions happen.
-            title = record['title']
+            record_title_original = record['title']
 
             # Using regular expressions with the re module is slower.
             # if re.search("Deprecated", record['state'], re.IGNORECASE) is not None or \
@@ -238,64 +266,13 @@ def main():
             else:
                 record['expiration_date'] = None
 
-            number_csv_entries += 1
-            name_collisions = 1
-            while name_collisions > 0:
-                # Since the keepass is only saved when the save method is called on the
-                # keepass object, we do not have to search for values in the keepass
-                # now, but we rather have to search in the list of items we want to
-                # add. If we have an existing keepass, we should check in it as well.
-                # entry_list = kp.find_entries_by_title(group_name + '/' + row['title'])
-                number_matches_from_keepass = len(kp.find_entries_by_title(record['title']))
-
-                # A comprehensive list returns a generator, we have thus to
-                # cast it to a list first as we are not able to get the size of
-                # a generator.
-                #
-                # csv_records is making use of an internal iterator. If we use
-                # it here, the pointer will be moved and other csv lines will
-                # not be reached.
-                #
-                # Remembering the location in the file is not a possible
-                # solution either as we cannot call csv_file.tell() in this
-                # case, because it is disabled when we are making use of an
-                # iterator.
-                # >>> OSError: telling position disabled by next() call
-                # It's better to reopen a file descriptor in this use case.
-                # src.: https://stackoverflow.com/a/6755778/3514658
-                # FIXME: I know this is increasing the big O complexity, but
-                # our csv file might not be sorted anyway. A more efficient
-                # algorithm would require sorting the csv file first and reuse
-                # the same file desriptor when checking.
-                with open(args.source.name, newline = '') as csv_file_bis:
-
-                    csv_records_bis = csv.DictReader(csv_file_bis, fields)
-                    number_matches_from_csv = len(list(x for x in csv_records_bis if x['title'].lower() == record['title'].lower()))
-
-                # Since this is the same file, there is the current occurrence
-                # in it, we need to remove it.
-                if number_matches_from_csv > 0:
-                    number_matches_from_csv -= 1
-
-                number_matches_from_memory = len(list(x for x in entries_to_add if x.title.lower() == record['title'].lower()))
-
-                number_matches = \
-                    number_matches_from_keepass + \
-                    number_matches_from_csv + \
-                    number_matches_from_memory
-                
-                if number_matches > 0:
-                    if name_collisions == 1 and username_sanitized:
-                        record['title'] = title + ' (' + str(username_sanitized) + ')'
-                    else:
-                        record['title'] = title + ' (' + str(name_collisions) + ')'
-                    name_collisions += 1
-                else:
-                    # Avoid to have too much records in memory by saving the
-                    # file.
-                    if len(entries_to_add) == NUMBER_MAX_RECORD_IN_MEMORY:
-                        kp.save(group, entries_to_add)
-
+            retry_count = 0
+            collision_username_used = False
+            while (True):
+                try:
+                    # We could have used kp.add_entry() instead but we want to
+                    # add a custom property to the entry and there is no other
+                    # option than creating our own custom add_entry method.
                     entry = Entry(
                         title = record['title'],
                         username = record['username'],
@@ -305,26 +282,44 @@ def main():
                         tags = None,
                         expires = True if record['expiration_date'] else False,
                         expiry_time = record['expiration_date'],
-                        icon = '0' # the key icon
+                        # the key icon
+                        icon = '0',
+                        version = kp.version
                     )
                     entry.set_custom_property('State', record['state'])
-                    entries_to_add.append(entry)
 
-                    name_collisions = 0
+                    # Try to add the entry. If an entry with the same title and
+                    # username already exists, fails.
+                    kp.add_entry(group, entry)
 
-        # If we reach the end of the csv file and we haven't reached our 10
-        # records, ensure to save it before leaving.
-        kp.save(group, entries_to_add)
+                    csv_records_inserted += 1
+                    info(progress(csv_records_inserted, csv_records_total) + ' Inserting "' + record['title'] + '"...')
 
-        if number_kp_entries != number_csv_entries:
-            error('Inconsistency detected.')
-        else:
-            info('Operation run successfully.')
-            
-        print('    Number of keepass entries added: ' + \
-                str(number_kp_entries) + \
-                '.\n    Number of csv records: ' + \
-                str(number_csv_entries))
+                    break
+
+                except Exception:
+                    error(record['title'] + ' already exists. Will try to avoid collision...')
+
+                    # If this is the first time it fails, just add the username
+                    # to the title to remove the collision.
+                    retry_count += 1
+                    if retry_count == 1 and record['username']:
+                        record['title'] = record_title_original + ' (' + sanitize_string(record['username']) + ')'
+                        collision_username_used = True
+                        continue
+
+                    # If we still have a collision, add a number as suffix.
+                    # We need to remove trailing number with parentheses first (if any)
+                    record_title_no_number = re.sub(r" \([0-9]+\)$", "", record['title'])
+                    if collision_username_used:
+                        retry_count_to_use = retry_count
+                    else:
+                        retry_count_to_use = retry_count + 1
+                    record['title'] = record_title_no_number + ' (' + str(retry_count_to_use) + ')'
+
+        kp.save()
+
+        info('Number of keepass entries added: ' + str(csv_records_inserted))
 
 
 if __name__ == "__main__":
